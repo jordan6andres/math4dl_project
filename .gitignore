@@ -1,0 +1,43 @@
+# =============================================================================
+# Git Ignore Rules — DL Math Project
+# =============================================================================
+
+# Raw / processed datasets (large files, reproducible via download script)
+data/*.csv
+data/*.json
+data/*.zip
+
+# Saved model weights and tokenizers (large binaries, reproducible via training)
+models/*
+!models/.gitkeep
+
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+
+# Environment / secrets
+.env
+.venv/
+venv/
+
+# Jupyter checkpoint folders
+.ipynb_checkpoints/
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# IDE-specific files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Report artifacts (generated during notebook run)
+reports/*.png
+reports/*.jpg
+reports/*.pdf
