@@ -38,13 +38,25 @@ MAXLEN_LSTM = 100
 MAXLEN_BERT = 128
 VOCAB_SIZE = 20000
 
+
 # ---------------------------------------------------------------------------
-# Caching model loads so Streamlit does not reload on every interaction
+# Model-loading helpers (cached so Streamlit does not reload on every click)
 # ---------------------------------------------------------------------------
 
 @st.cache_resource(show_spinner="Loading LSTM model …")
 def load_lstm_model():
-    """Load the trained LSTM model from disk."""
+    """
+    Load the trained LSTM Keras model from disk.
+
+    The model is expected at ``models/lstm_model.keras`` relative to the
+    project root.  If the file is missing, the app displays an error and
+    stops.
+
+    Returns
+    -------
+    keras.Model
+        Compiled LSTM model ready for ``model.predict()``.
+    """
     path = os.path.join(MODELS_DIR, "lstm_model.keras")
     if not os.path.exists(path):
         st.error(f"LSTM model not found at `{path}`. Train the model in the notebook first.")
@@ -54,7 +66,18 @@ def load_lstm_model():
 
 @st.cache_resource(show_spinner="Loading BERT model …")
 def load_bert_model():
-    """Load the trained BERT classifier from disk."""
+    """
+    Load the trained BERT-based Keras classifier from disk.
+
+    The model is expected at ``models/bert_model.keras`` relative to the
+    project root.  If the file is missing, the app displays an error and
+    stops.
+
+    Returns
+    -------
+    keras.Model
+        Compiled BERT classifier ready for ``model.predict()``.
+    """
     path = os.path.join(MODELS_DIR, "bert_model.keras")
     if not os.path.exists(path):
         st.error(f"BERT model not found at `{path}`. Train the model in the notebook first.")
@@ -64,10 +87,19 @@ def load_bert_model():
 
 @st.cache_resource(show_spinner="Loading tokenizers …")
 def load_tokenizers():
-    """Load the LSTM vocabulary and the BERT tokenizer."""
-    # LSTM vocab is not persisted as a separate file in the lean workflow,
-    # so we rebuild it from the training data if available.
-    # For the demo we fall back to a dummy vocab if the CSV is missing.
+    """
+    Build the LSTM vocabulary and load the pre-trained BERT tokenizer.
+
+    The LSTM vocabulary is rebuilt from ``data/train.csv`` so the demo can
+    run without a separate vocab file.  If the training CSV is missing, a
+    minimal fallback vocabulary (``<pad>``, ``<unk>``) is used.
+
+    Returns
+    -------
+    tuple[dict, BertTokenizer]
+        * ``vocab`` — word -> integer mapping for the LSTM path.
+        * ``bert_tokenizer`` — Hugging Face tokenizer for the BERT path.
+    """
     vocab = {"<pad>": 0, "<unk>": 1}
 
     train_csv = os.path.join(PROJECT_ROOT, "data", "train.csv")
@@ -88,6 +120,21 @@ def load_tokenizers():
 # ---------------------------------------------------------------------------
 
 def main():
+    """
+    Build and render the Streamlit demo interface.
+
+    The UI consists of:
+      * A title and description.
+      * A sidebar to choose between LSTM and BERT.
+      * A text area for the user to paste a news article.
+      * A "Classify" button that runs inference and displays the
+        predicted category plus a probability bar chart.
+
+    Returns
+    -------
+    None
+        This function only renders Streamlit widgets.
+    """
     st.set_page_config(page_title="AG News Classifier", page_icon="📰")
     st.title("📰 AG News Classifier")
     st.markdown(
