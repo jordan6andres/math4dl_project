@@ -24,7 +24,6 @@ from sklearn.metrics import (
     accuracy_score,
 )
 
-
 # ---------------------------------------------------------------------------
 # Plotting helpers
 # ---------------------------------------------------------------------------
@@ -215,3 +214,67 @@ def compute_metrics(
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
     }
+
+
+
+def plot_training_history(history, save_path=None):
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4))
+
+    axes[0].plot(history["accuracy"],     label="Train")
+    axes[0].plot(history["val_accuracy"], label="Validation")
+    axes[0].set_title("Model Accuracy")
+    axes[0].set_xlabel("Epoch")
+    axes[0].set_ylabel("Accuracy")
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
+
+    axes[1].plot(history["loss"],     label="Train")
+    axes[1].plot(history["val_loss"], label="Validation")
+    axes[1].set_title("Model Loss")
+    axes[1].set_xlabel("Epoch")
+    axes[1].set_ylabel("Loss")
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    return fig
+
+
+def plot_confusion_matrix(y_true, y_pred, class_names=None, normalize=True, save_path=None):
+    cm = confusion_matrix(y_true, y_pred)
+    if normalize:
+        cm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
+        fmt, title = ".2f", "Confusion Matrix (normalised)"
+    else:
+        fmt, title = "d", "Confusion Matrix (counts)"
+
+    fig, ax = plt.subplots(figsize=(8, 6))
+    sns.heatmap(cm, annot=True, fmt=fmt, cmap="Blues",
+                xticklabels=class_names, yticklabels=class_names, ax=ax)
+    ax.set_title(title)
+    ax.set_ylabel("True Label")
+    ax.set_xlabel("Predicted Label")
+    plt.tight_layout()
+    if save_path:
+        os.makedirs(os.path.dirname(save_path) or ".", exist_ok=True)
+        fig.savefig(save_path, dpi=150, bbox_inches="tight")
+    plt.show()
+    return fig
+
+
+def print_classification_report(y_true, y_pred, class_names=None):
+    print(classification_report(y_true, y_pred, target_names=class_names, digits=4))
+    return classification_report(y_true, y_pred, target_names=class_names, output_dict=True)
+
+
+def compute_metrics(y_true, y_pred):
+    acc = accuracy_score(y_true, y_pred)
+    report = classification_report(y_true, y_pred, output_dict=True, zero_division=0)
+    print(f"Accuracy    : {acc:.4f}")
+    print(f"Macro F1    : {report['macro avg']['f1-score']:.4f}")
+    print(f"Weighted F1 : {report['weighted avg']['f1-score']:.4f}")
+    return {"accuracy": round(acc, 4), "macro_f1": round(report["macro avg"]["f1-score"], 4)}
