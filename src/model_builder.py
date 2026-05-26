@@ -1,89 +1,152 @@
 """
 model_builder.py
 
-Factory functions that return compiled Keras models for the AG News
+Factory functions that return compiled Keras 3 models for the AG News
 Classification project.
 
 Two architectures are provided:
-  1. A lightweight **LSTM from scratch** with an embedding layer.
+  1. A lightweight **BiLSTM from scratch** with an embedding layer.
   2. A **BERT-based classifier** built on top of a pre-trained transformer.
 
-Every function accepts hyper-parameters so the notebook can experiment
-without modifying source code.
+Backend
+-------
+This module uses standalone Keras 3 (``import keras``), which supports
+multiple computation backends via the ``KERAS_BACKEND`` environment variable.
+
+  * ``KERAS_BACKEND=torch``      -> PyTorch (default here, GPU on Windows).
+  * ``KERAS_BACKEND=tensorflow`` -> TensorFlow (required for ``build_bert_classifier``).
+  * ``KERAS_BACKEND=jax``        -> JAX.
+
+We call ``os.environ.setdefault`` rather than a hard assignment so callers can
+override the backend by setting the env var **before** importing this module.
 """
 
-from typing import Optional
-import tensorflow as tf
-from tensorflow import keras
-from transformers import TFBertModel, BertTokenizer
+import os
+
+# Default to PyTorch so the scratch LSTM uses the RTX 3060 on native Windows.
+# TensorFlow >= 2.11 dropped Windows GPU support, so torch is the practical choice.
+os.environ.setdefault("KERAS_BACKEND", "torch")
+
+import keras
 
 
 # ---------------------------------------------------------------------------
-# 1. Scratch LSTM Model
+# 0. Backend / accelerator verification helper
+# ---------------------------------------------------------------------------
+
+def verify_backend() -> dict:
+    """
+    Print and return the active Keras backend plus accelerator info.
+
+    Returns
+    -------
+    dict
+        Keys: ``keras_version``, ``backend``, ``framework_version``,
+        ``cuda_available``, ``device_name``.
+    """
+    info = {
+        "keras_version": keras.__version__,
+        "backend": keras.backend.backend(),
+    }
+    backend = info["backend"]
+
+    if backend == "torch":
+        import torch
+        info["framework_version"] = torch.__version__
+        info["cuda_available"] = torch.cuda.is_available()
+        info["device_name"] = (
+            torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
+        )
+    elif backend == "tensorflow":
+        import tensorflow as tf
+        info["framework_version"] = tf.__version__
+        gpus = tf.config.list_physical_devices("GPU")
+        info["cuda_available"] = bool(gpus)
+        info["device_name"] = gpus[0].name if gpus else "cpu"
+    elif backend == "jax":
+        import jax
+        info["framework_version"] = jax.__version__
+        info["cuda_available"] = any(d.platform == "gpu" for d in jax.devices())
+        info["device_name"] = str(jax.devices()[0])
+
+    width = max(len(k) for k in info)
+    for k, v in info.items():
+        print(f"{k:>{width}}: {v}")
+    return info
+
+
+# ---------------------------------------------------------------------------
+# 1. Scratch BiLSTM Model
 # ---------------------------------------------------------------------------
 
 def build_lstm_model(
     vocab_size: int,
     embedding_dim: int = 128,
-    maxlen: int = 100,
+    maxlen: int = 128,
     lstm_units: int = 64,
     dropout_rate: float = 0.5,
     num_classes: int = 4,
+    learning_rate: float = 1e-3,
 ) -> keras.Model:
     """
-    Build and return a compiled LSTM text-classifier.
+    Build and return a compiled BiLSTM text-classifier.
 
     Architecture
     ------------
-    Input -> Embedding -> SpatialDropout1D -> Bidirectional LSTM ->
-    Dense(64, ReLU) -> Dropout -> Dense(num_classes, softmax)
+    Input -> Embedding -> SpatialDropout1D -> Bidirectional LSTM(return_sequences=True)
+    -> GlobalMaxPool1D -> Dense(64, ReLU) -> Dropout -> Dense(num_classes, softmax)
+
+    GPU notes
+    ---------
+    ``mask_zero`` on the Embedding and ``recurrent_dropout`` on the LSTM are
+    intentionally disabled so the layer runs on PyTorch's fused ``nn.LSTM``
+    kernel (cuDNN under the hood). Inputs are post-padded with zeros and the
+    GlobalMaxPool downstream is robust to that padding noise.
 
     Parameters
     ----------
     vocab_size : int
-        Size of the vocabulary (including ``<pad>`` and ``<unk>``).
-    embedding_dim : int, optional
-        Dimensionality of the embedding vectors (default 128).
-    maxlen : int, optional
-        Length of input sequences (default 100). Used only to define the
-        input shape; the model itself is agnostic to this value at runtime.
-    lstm_units : int, optional
-        Number of hidden units in the LSTM layer (default 64).
-    dropout_rate : float, optional
-        Dropout rate applied after the LSTM and before the final classifier
-        (default 0.5).
-    num_classes : int, optional
-        Number of output classes, i.e. the dimension of the softmax layer
-        (default 4 for AG News).
+        Number of distinct token ids, including padding (0) and ``<OOV>`` (1).
+    embedding_dim : int, default 128
+        Dimensionality of the embedding vectors. Directly ties into the
+        "embeddings as a learned linear map" topic from the course.
+    maxlen : int, default 128
+        Sequence length the model expects.
+    lstm_units : int, default 64
+        Hidden units per LSTM direction; the BiLSTM output dim is ``2 * lstm_units``.
+    dropout_rate : float, default 0.5
+        Dropout applied before the final classifier.
+    num_classes : int, default 4
+        Output classes (4 for AG News: World, Sports, Business, Sci/Tech).
+    learning_rate : float, default 1e-3
+        Adam learning rate.
 
     Returns
     -------
     keras.Model
-        Compiled Keras model ready for ``model.fit()``.
+        Compiled with ``categorical_crossentropy`` -- labels must be one-hot.
     """
-    model = keras.Sequential(
-        [
-            keras.layers.Embedding(
-                input_dim=vocab_size,
-                output_dim=embedding_dim,
-                input_length=maxlen,
-                mask_zero=True,
-                name="embedding",
-            ),
-            keras.layers.SpatialDropout1D(0.2, name="spatial_dropout"),
-            keras.layers.Bidirectional(
-                keras.layers.LSTM(lstm_units, dropout=0.2, recurrent_dropout=0.2),
-                name="bi_lstm",
-            ),
-            keras.layers.Dense(64, activation="relu", name="dense_relu"),
-            keras.layers.Dropout(dropout_rate, name="dropout"),
-            keras.layers.Dense(num_classes, activation="softmax", name="output"),
-        ],
-        name="ag_news_lstm",
-    )
+    inputs = keras.layers.Input(shape=(maxlen,), dtype="int32", name="input_ids")
+    x = keras.layers.Embedding(
+        input_dim=vocab_size,
+        output_dim=embedding_dim,
+        name="embedding",
+    )(inputs)
+    x = keras.layers.SpatialDropout1D(0.2, name="spatial_dropout")(x)
+    x = keras.layers.Bidirectional(
+        keras.layers.LSTM(lstm_units, return_sequences=True),
+        name="bi_lstm",
+    )(x)
+    x = keras.layers.GlobalMaxPooling1D(name="global_max_pool")(x)
+    x = keras.layers.Dense(64, activation="relu", name="dense_relu")(x)
+    x = keras.layers.Dropout(dropout_rate, name="dropout")(x)
+    outputs = keras.layers.Dense(
+        num_classes, activation="softmax", name="output"
+    )(x)
 
+    model = keras.Model(inputs=inputs, outputs=outputs, name="ag_news_lstm")
     model.compile(
-        optimizer=keras.optimizers.Adam(learning_rate=1e-3),
+        optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
         loss="categorical_crossentropy",
         metrics=["accuracy"],
     )
@@ -91,7 +154,7 @@ def build_lstm_model(
 
 
 # ---------------------------------------------------------------------------
-# 2. BERT-based Classifier
+# 2. BERT-based Classifier (TF-only path, used by step 3)
 # ---------------------------------------------------------------------------
 
 def build_bert_classifier(
@@ -103,54 +166,34 @@ def build_bert_classifier(
     """
     Build and return a compiled BERT-based text-classifier.
 
-    The model loads a pre-trained BERT encoder, freezes its weights by default,
-    and attaches a shallow classification head.  To fine-tune BERT layers,
-    call ``model.get_layer("bert").trainable = True`` after instantiation.
+    .. important::
+       This function uses HuggingFace's TF model (``TFBertModel``) and therefore
+       requires ``KERAS_BACKEND=tensorflow``. Set the env var **before** importing
+       this module (typically in a fresh kernel dedicated to the BERT run).
 
     Architecture
     ------------
-    Input(ids + attention_mask) -> BERT encoder -> Mean pooling over
-    token embeddings -> Dense(num_classes, softmax)
-
-    Parameters
-    ----------
-    bert_model_name : str, optional
-        Hugging Face model identifier (default ``"bert-base-uncased"``).
-    max_length : int, optional
-        Maximum token length for BERT inputs (default 128).
-    num_classes : int, optional
-        Number of output classes (default 4 for AG News).
-    learning_rate : float, optional
-        Learning rate for the Adam optimiser (default 2e-5), suitable for
-        fine-tuning transformer models.
-
-    Returns
-    -------
-    keras.Model
-        Compiled Keras model ready for ``model.fit()``.
+    Input(ids + attention_mask) -> BERT encoder -> Mean pooling ->
+    Dense(num_classes, softmax)
     """
-    # Load the pre-trained transformer as a Keras layer
-    bert_encoder = TFBertModel.from_pretrained(bert_model_name)
-    bert_encoder.trainable = False  # Freeze by default; unfreeze for fine-tuning
+    # Lazy imports so `import model_builder` does not require transformers or TF.
+    import tensorflow as tf  # noqa: F401
+    from transformers import TFBertModel
 
-    # Define inputs
+    bert_encoder = TFBertModel.from_pretrained(bert_model_name)
+    bert_encoder.trainable = False  # Freeze by default; unfreeze for fine-tuning.
+
     input_ids = keras.layers.Input(
-        shape=(max_length,), dtype=tf.int32, name="input_ids"
+        shape=(max_length,), dtype="int32", name="input_ids"
     )
     attention_mask = keras.layers.Input(
-        shape=(max_length,), dtype=tf.int32, name="attention_mask"
+        shape=(max_length,), dtype="int32", name="attention_mask"
     )
 
-    # Forward pass through BERT
-    bert_outputs = bert_encoder(
-        input_ids=input_ids, attention_mask=attention_mask
-    )
-    # bert_outputs.last_hidden_state shape: (batch, max_length, hidden_size)
+    bert_outputs = bert_encoder(input_ids=input_ids, attention_mask=attention_mask)
     pooled = keras.layers.GlobalAveragePooling1D(name="mean_pooling")(
         bert_outputs.last_hidden_state
     )
-
-    # Classification head
     outputs = keras.layers.Dense(
         num_classes, activation="softmax", name="classifier"
     )(pooled)
@@ -160,7 +203,6 @@ def build_bert_classifier(
         outputs=outputs,
         name="ag_news_bert",
     )
-
     model.compile(
         optimizer=keras.optimizers.Adam(learning_rate=learning_rate),
         loss="categorical_crossentropy",
@@ -169,19 +211,7 @@ def build_bert_classifier(
     return model
 
 
-def get_bert_tokenizer(bert_model_name: str = "bert-base-uncased") -> BertTokenizer:
-    """
-    Load and return a pre-trained BERT tokenizer.
-
-    Parameters
-    ----------
-    bert_model_name : str, optional
-        Hugging Face model identifier (default ``"bert-base-uncased"``).
-
-    Returns
-    -------
-    BertTokenizer
-        Tokenizer instance with ``pad_token`` already defined.
-    """
-    tokenizer = BertTokenizer.from_pretrained(bert_model_name)
-    return tokenizer
+def get_bert_tokenizer(bert_model_name: str = "bert-base-uncased"):
+    """Load and return a pre-trained BERT tokenizer (HuggingFace)."""
+    from transformers import BertTokenizer
+    return BertTokenizer.from_pretrained(bert_model_name)
