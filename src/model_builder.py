@@ -1,73 +1,52 @@
 """
 model_builder.py
 
-Factory functions that return compiled Keras 3 models for the AG News
+Factory functions that return compiled tf.keras models for the AG News
 Classification project.
 
 Two architectures are provided:
   1. A lightweight **BiLSTM from scratch** with an embedding layer.
   2. A **BERT-based classifier** built on top of a pre-trained transformer.
 
-Backend
--------
-This module uses standalone Keras 3 (``import keras``), which supports
-multiple computation backends via the ``KERAS_BACKEND`` environment variable.
-
-  * ``KERAS_BACKEND=torch``      -> PyTorch (default here, GPU on Windows).
-  * ``KERAS_BACKEND=tensorflow`` -> TensorFlow (required for ``build_bert_classifier``).
-  * ``KERAS_BACKEND=jax``        -> JAX.
-
-We call ``os.environ.setdefault`` rather than a hard assignment so callers can
-override the backend by setting the env var **before** importing this module.
+Stack
+-----
+This module uses classic ``tf.keras`` (TensorFlow 2.10) for native Windows
+GPU support via CUDA 11.2 + cuDNN 8.1. No standalone ``keras`` package or
+``KERAS_BACKEND`` env var is involved.
 """
 
-import os
+from typing import Optional
 
-# Default to PyTorch so the scratch LSTM uses the RTX 3060 on native Windows.
-# TensorFlow >= 2.11 dropped Windows GPU support, so torch is the practical choice.
-os.environ.setdefault("KERAS_BACKEND", "torch")
-
-import keras
+import tensorflow as tf
+from tensorflow import keras
 
 
 # ---------------------------------------------------------------------------
-# 0. Backend / accelerator verification helper
+# 0. GPU verification helper
 # ---------------------------------------------------------------------------
 
-def verify_backend() -> dict:
+def verify_gpu() -> dict:
     """
-    Print and return the active Keras backend plus accelerator info.
+    Print and return TensorFlow / CUDA accelerator info.
 
     Returns
     -------
     dict
-        Keys: ``keras_version``, ``backend``, ``framework_version``,
-        ``cuda_available``, ``device_name``.
+        Keys: ``tf_version``, ``built_with_cuda``, ``num_gpus``, ``device_name``.
     """
+    gpus = tf.config.list_physical_devices("GPU")
     info = {
-        "keras_version": keras.__version__,
-        "backend": keras.backend.backend(),
+        "tf_version": tf.__version__,
+        "built_with_cuda": tf.test.is_built_with_cuda(),
+        "num_gpus": len(gpus),
+        "device_name": gpus[0].name if gpus else "cpu",
     }
-    backend = info["backend"]
-
-    if backend == "torch":
-        import torch
-        info["framework_version"] = torch.__version__
-        info["cuda_available"] = torch.cuda.is_available()
-        info["device_name"] = (
-            torch.cuda.get_device_name(0) if torch.cuda.is_available() else "cpu"
-        )
-    elif backend == "tensorflow":
-        import tensorflow as tf
-        info["framework_version"] = tf.__version__
-        gpus = tf.config.list_physical_devices("GPU")
-        info["cuda_available"] = bool(gpus)
-        info["device_name"] = gpus[0].name if gpus else "cpu"
-    elif backend == "jax":
-        import jax
-        info["framework_version"] = jax.__version__
-        info["cuda_available"] = any(d.platform == "gpu" for d in jax.devices())
-        info["device_name"] = str(jax.devices()[0])
+    # Try to grow GPU memory lazily so other processes can share the card.
+    for gpu in gpus:
+        try:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        except Exception:
+            pass  # Already initialised, that is fine.
 
     width = max(len(k) for k in info)
     for k, v in info.items():
@@ -99,9 +78,9 @@ def build_lstm_model(
     GPU notes
     ---------
     ``mask_zero`` on the Embedding and ``recurrent_dropout`` on the LSTM are
-    intentionally disabled so the layer runs on PyTorch's fused ``nn.LSTM``
-    kernel (cuDNN under the hood). Inputs are post-padded with zeros and the
-    GlobalMaxPool downstream is robust to that padding noise.
+    intentionally disabled so the layer runs on the cuDNN fused LSTM kernel.
+    Inputs are post-padded with zeros and the downstream GlobalMaxPool is
+    robust to that padding noise.
 
     Parameters
     ----------
@@ -126,7 +105,7 @@ def build_lstm_model(
     keras.Model
         Compiled with ``categorical_crossentropy`` -- labels must be one-hot.
     """
-    inputs = keras.layers.Input(shape=(maxlen,), dtype="int32", name="input_ids")
+    inputs = keras.layers.Input(shape=(maxlen,), dtype=tf.int32, name="input_ids")
     x = keras.layers.Embedding(
         input_dim=vocab_size,
         output_dim=embedding_dim,
@@ -166,22 +145,20 @@ def build_bert_classifier(
     """
     Build and return a compiled BERT-based text-classifier.
 
-    .. important::
-       This function uses HuggingFace's TF model (``TFBertModel``) and therefore
-       requires ``KERAS_BACKEND=tensorflow``. Set the env var **before** importing
-       this module (typically in a fresh kernel dedicated to the BERT run).
+    The model loads a pre-trained BERT encoder, freezes its weights by default,
+    and attaches a shallow classification head. To fine-tune BERT layers,
+    set ``model.get_layer("bert").trainable = True`` after instantiation.
 
     Architecture
     ------------
-    Input(ids + attention_mask) -> BERT encoder -> Mean pooling ->
-    Dense(num_classes, softmax)
+    Input(ids + attention_mask) -> BERT encoder -> Mean pooling over token
+    embeddings -> Dense(num_classes, softmax)
     """
-    # Lazy imports so `import model_builder` does not require transformers or TF.
-    import tensorflow as tf  # noqa: F401
+    # Lazy import so `import model_builder` does not require transformers.
     from transformers import TFBertModel
 
     bert_encoder = TFBertModel.from_pretrained(bert_model_name)
-    bert_encoder.trainable = False  # Freeze by default; unfreeze for fine-tuning.
+    bert_encoder.trainable = False
 
     input_ids = keras.layers.Input(
         shape=(max_length,), dtype="int32", name="input_ids"
